@@ -24,7 +24,10 @@ declare module "ultimate-express" {
     export import urlencoded = e.urlencoded;
 
     export import RouterOptions = e.RouterOptions;
-    export import Application = e.Application;
+    // export import Application = e.Application;
+    export interface Application extends e.Application {
+      readonly uwsApp: uWS.TemplatedApp;
+    }
     export import CookieOptions = e.CookieOptions;
     export import Errback = e.Errback;
     export import ErrorRequestHandler = e.ErrorRequestHandler;
@@ -45,7 +48,7 @@ declare module "ultimate-express" {
     export import Send = e.Send;
   }
 
-  function express(settings?: Settings): e.Express & {readonly uwsApp: uWS.TemplatedApp};
+  function express(settings?: Settings): express.Application;
 
   export = express;
 }
