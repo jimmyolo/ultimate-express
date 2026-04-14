@@ -74,6 +74,8 @@ module.exports = class Response extends Writable {
     #pendingChunks = [];
     #lastWriteChunkTime = 0;
     #writeTimeout = null;
+    #chunkedCallback = null;
+    #onWritableActive = false;
     req;
     constructor(res, req, app) {
         super();
@@ -132,82 +134,70 @@ module.exports = class Response extends Writable {
     }
 
     _write(chunk, encoding, callback) {
-        if (this.aborted) {
+        if(this.aborted) {
             const err = new Error('Request aborted');
             err.code = 'ECONNABORTED';
             return this.destroy(err);
         }
-        if (this.finished) {
+        if(this.finished) {
             const err = new Error('Response already finished');
             return this.destroy(err);
         }
 
         this.writingChunk = true;
         this._res.cork(() => {
-            if (!this.headersSent) {
+            if(!Buffer.isBuffer(chunk) && !(chunk instanceof ArrayBuffer)) {
+                chunk = Buffer.from(chunk);
+                chunk = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+            }
+            if(!this.headersSent) {
                 this.writeHead(this.statusCode);
                 const statusMessage = this.statusText ?? statuses.message[this.statusCode] ?? '';
                 this._res.writeStatus(`${this.statusCode} ${statusMessage}`.trim());
                 this.writeHeaders(typeof chunk === 'string');
             }
-    
-            if (!Buffer.isBuffer(chunk) && !(chunk instanceof ArrayBuffer)) {
-                chunk = Buffer.from(chunk);
-                chunk = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-            }
-    
-            if (this.chunkedTransfer) {
-                this.#pendingChunks.push(chunk);
-                const size = this.#pendingChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
-                const now = performance.now();
-                // the first chunk is sent immediately (!this.#lastWriteChunkTime)
-                // the other chunks are sent when watermark is reached (size >= HIGH_WATERMARK) 
-                // or if elapsed 50ms of last send (now - this.#lastWriteChunkTime > 50)
-                if (!this.#lastWriteChunkTime || size >= HIGH_WATERMARK || now - this.#lastWriteChunkTime > 50) {
-                    this._res.write(Buffer.concat(this.#pendingChunks, size));
-                    this.#pendingChunks = [];
-                    this.#lastWriteChunkTime = now;
-                    if(this.#writeTimeout) {
-                        clearTimeout(this.#writeTimeout);
-                        this.#writeTimeout = null;
-                    }
-                } else if(!this.#writeTimeout) {
-                    this.#writeTimeout = setTimeout(() => {
-                        this.#writeTimeout = null;
-                        if(!this.finished && !this.aborted) this._res.cork(() => {
-                            if(this.#pendingChunks.length) {
-                                const size = this.#pendingChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
-                                this._res.write(Buffer.concat(this.#pendingChunks, size));
-                                this.#pendingChunks = [];
-                                this.#lastWriteChunkTime = performance.now();
-                            }
-                        });
-                    }, 50);
-                    this.#writeTimeout.unref();
+
+            if(this.chunkedTransfer) {
+                const ok = this._res.write(chunk);
+                if(ok) {
+                    this.writingChunk = false;
+                    callback(null);
+                } else {
+                    this.#chunkedCallback = callback;
+                    if(this.#onWritableActive) return;
+                    this.#onWritableActive = true;
+                    this._res.onWritable((offset) => {
+                        if(this.finished) return true;
+                        const cb = this.#chunkedCallback;
+                        this.#chunkedCallback = null;
+                        if(cb) {
+                            this.writingChunk = false;
+                            cb(null);
+                        }
+                        return false;
+                    });
                 }
-                this.writingChunk = false;
-                callback(null);
             } else {
                 const lastOffset = this._res.getWriteOffset();
                 const [ok, done] = this._res.tryEnd(chunk, this.totalSize);
-                if (done) {
+                if(done) {
                     super.end();
                     this.finished = true;
                     this.writingChunk = false;
                     this.#socket?.emit('close');
                     callback(null);
-                } else if (!ok) {
+                } else if(!ok) {
                     this._res.ab = chunk;
                     this._res.abOffset = lastOffset;
                     let handlerUsed = false;
                     this._res.onWritable((offset) => {
-                        if (this.finished || handlerUsed) return true;
+                        if(this.finished || handlerUsed) return true;
                         const [ok, done] = this._res.tryEnd(this._res.ab.slice(offset - this._res.abOffset), this.totalSize);
-                        if (done) {
+                        if(done) {
                             this.finished = true;
                             this.#socket?.emit('close');
                         }
-                        if (ok) {
+                        if(ok) {
                             this.writingChunk = false;
                             handlerUsed = true;
                             callback(null);
