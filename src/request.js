@@ -98,11 +98,13 @@ module.exports = class Request extends Readable {
             this.method === 'PATCH' || 
             (additionalMethods && additionalMethods.includes(this.method))
         ) {
-            this._res.onData((ab, isLast) => {
+            this._res.onDataV2((ab, maxRemainingBodyLength) => {
                 this.receivedData = true;
                 if(this.#responseEnded) {
                     return;
                 }
+
+                const isLast = maxRemainingBodyLength === 0n;
                 // ab.slice(0) copies the ArrayBuffer; uWS neuters `ab` after this callback,
                 // so a Buffer.from(ab) view would corrupt data left in the Readable queue.
                 const chunk = Buffer.from(ab.slice(0));
