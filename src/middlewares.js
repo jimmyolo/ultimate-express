@@ -148,7 +148,7 @@ function createBodyParser(defaultType, beforeReturn) {
         }
         if(typeof options.limit === 'undefined') options.limit = bytes('100kb');
         else options.limit = bytes(options.limit);
-    
+
         if(typeof options.inflate === 'undefined') options.inflate = true;
         if(typeof options.type === 'undefined') options.type = defaultType;
         if(typeof options.type === 'string') {
@@ -222,9 +222,7 @@ function createBodyParser(defaultType, beforeReturn) {
                 return next();
             }
 
-            const abs = [];
             let inflate;
-            let totalSize = 0;
             if(options.inflate) {
                 inflate = createInflate(req.headers['content-encoding']);
                 if(inflate === false) {
@@ -234,49 +232,120 @@ function createBodyParser(defaultType, beforeReturn) {
 
             req.bodyRead = true;
 
-            function onData(buf) {
-                if(!Buffer.isBuffer(buf)) {
-                    buf = Buffer.from(buf);
-                }
-                if(inflate) {
-                    buf = inflate.process(buf);
+            // Streaming fallback. Used when:
+            //   - inflate is active: post-decompression size is unknown, so we
+            //     can't pre-allocate based on maxRemainingBodyLength.
+            //   - req.receivedData is true: an upstream async middleware caused
+            //     request.js's onDataV2 handler to fire and push chunks into
+            //     the Readable queue before this middleware ran.
+            if(inflate || req.receivedData) {
+                const abs = [];
+                let totalSize = 0;
+
+                function onData(buf) {
+                    if(res.finished || res.aborted) return;
+                    if(!Buffer.isBuffer(buf)) {
+                        buf = Buffer.from(buf);
+                    }
+                    if(inflate) {
+                        buf = inflate.process(buf);
+                    }
+                    abs.push(buf);
+                    totalSize += buf.length;
+                    if(totalSize > options.limit) {
+                        return next(new Error('Request entity too large'));
+                    }
                 }
 
-                // shallow copy, to avoid shared references for large bodies.
-                abs.push(Buffer.from(buf));
+                function onEnd() {
+                    const buf = Buffer.concat(abs);
+                    if(options.verify) {
+                        try {
+                            options.verify(req, res, buf);
+                        } catch(e) {
+                            return next(e);
+                        }
+                    }
+                    beforeReturn(req, res, next, options, buf);
+                }
 
-                totalSize += buf.length;
-                if(totalSize > options.limit) {
+                if(req.receivedData) {
+                    req.on('data', onData);
+                    req.on('end', onEnd);
+                } else {
+                    req._res.onDataV2((ab, maxRemainingBodyLength) => {
+                        const isLast = maxRemainingBodyLength === 0n;
+                        // slice(0) detaches bytes from uWS-owned ab (neutered after this callback)
+                        onData(ab.slice(0));
+                        if(isLast && !res.finished && !res.aborted) {
+                            onEnd();
+                        }
+                    });
+                }
+                return;
+            }
+
+            // Pre-alloc fast path: one Buffer.allocUnsafe(predicted) up front
+            // using uWS's maxRemainingBodyLength hint and copy each chunk
+            // straight into it. One copy per chunk, no per-chunk Buffer
+            // allocation, no final Buffer.concat.
+            let buffer = null;
+            let offset = 0;
+
+            req._res.onDataV2((ab, maxRemainingBodyLength) => {
+                if(res.finished || res.aborted) return;
+
+                const chunkLen = ab.byteLength;
+
+                if(buffer === null) {
+                    // First chunk: uWS hints the predicted total via
+                    // maxRemainingBodyLength. The upfront Content-Length check
+                    // earlier in the handler rejects oversize bodies when the
+                    // header is present; this second check covers chunked
+                    // transfer encoding (no Content-Length) and clients that
+                    // under-report it.
+                    const total = chunkLen + Number(maxRemainingBodyLength);
+                    if(total > options.limit) {
+                        return next(new Error('Request entity too large'));
+                    }
+                    buffer = Buffer.allocUnsafe(total);
+                }
+
+                const newOffset = offset + chunkLen;
+
+                // Per-chunk limit guard. maxRemainingBodyLength is a maximum,
+                // not exact — protect against an under-reporting client
+                // overflowing the buffer.
+                if(newOffset > options.limit) {
                     return next(new Error('Request entity too large'));
                 }
-            }
-    
-            function onEnd() {
-                const buf = Buffer.concat(abs);
-                if(options.verify) {
-                    try {
-                        options.verify(req, res, buf);
-                    } catch(e) {
-                        return next(e);
-                    }
+
+                // Defensive grow if the prediction was too small.
+                if(newOffset > buffer.length) {
+                    const grown = Buffer.allocUnsafe(newOffset);
+                    buffer.copy(grown, 0, 0, offset);
+                    buffer = grown;
                 }
-                beforeReturn(req, res, next, options, buf);
-            }
-    
-            // reading data directly from uWS is faster than from a stream
-            // if we are fast enough (not async), we can do it
-            // otherwise we need to use a stream since it already started streaming it
-            if(!req.receivedData) {
-                req._res.onData((ab, isLast) => {
-                    onData(ab);
-                    if(isLast) {
-                        onEnd();
+
+                buffer.set(new Uint8Array(ab), offset);
+                offset = newOffset;
+
+                if(maxRemainingBodyLength === 0n) {
+                    if(res.finished || res.aborted) return;
+                    // subarray, never the raw allocUnsafe buffer — when the
+                    // actual body is smaller than the prediction the trailing
+                    // bytes are uninitialized heap memory.
+                    const body = buffer.subarray(0, offset);
+                    if(options.verify) {
+                        try {
+                            options.verify(req, res, body);
+                        } catch(e) {
+                            return next(e);
+                        }
                     }
-                });
-            } else {
-                req.on('data', onData);
-                req.on('end', onEnd);
-            }
+                    beforeReturn(req, res, next, options, body);
+                }
+            });
         }
     }
 }
