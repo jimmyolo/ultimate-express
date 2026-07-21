@@ -68,7 +68,7 @@ function patternToRegex(pattern, isPrefix = false) {
         const [match, prefix, param, regex] = result;
         const optional = match.endsWith('?');
         // Convert :param to capture group
-        regexPattern += `${optional ? '(' : ''}${prefix}(?<${param}>${regex ? regex + '(?=$|\/)' : '[^/]+'})${optional ? ')?' : ''}`;
+        regexPattern += `${optional ? '(' : ''}${prefix}(?<${param}>${regex ? regex : '[^/]+'})${optional ? ')?' : ''}`;
         offset = result.index + match.length;
     }
 

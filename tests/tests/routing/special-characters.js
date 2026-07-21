@@ -16,6 +16,10 @@ app.get('/test/:from--:to', (req, res) => {
     res.send(`from: ${req.params.from}, to: ${req.params.to}`);
 });
 
+app.get('/alt/:from(a|ab)-:to', (req, res) => {
+    res.send(`alt from: ${req.params.from}, to: ${req.params.to}`);
+});
+
 app.listen(13333, async () => {
     console.log('Server is running on port 13333');
 
@@ -29,6 +33,9 @@ app.listen(13333, async () => {
     console.log(await res.text());
     
     res = await fetch('http://localhost:13333/test/123--xyz');
+    console.log(await res.text());
+
+    res = await fetch('http://localhost:13333/alt/ab-1');
     console.log(await res.text());
 
     process.exit(0);
