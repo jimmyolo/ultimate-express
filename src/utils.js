@@ -67,8 +67,15 @@ function patternToRegex(pattern, isPrefix = false) {
         if (!result) break;
         const [match, prefix, param, regex] = result;
         const optional = match.endsWith('?');
+        /*
+         * Mirror path-to-regexp@0.1.x: a custom capture's first `*` becomes
+         * `(.*)`, so `.*` -> `.(.*)` and `[^-]*` -> `[^-](.*)`. This keeps the
+         * captured param at >=1 char before a following literal, matching
+         * Express (a bare `.*` here would let the param match empty).
+         */
+        const body = regex ? regex.replace(/\\.|\*/, m => m === '*' ? '(.*)' : m) : '[^/]+';
         // Convert :param to capture group
-        regexPattern += `${optional ? '(' : ''}${prefix}(?<${param}>${regex ? regex : '[^/]+'})${optional ? ')?' : ''}`;
+        regexPattern += `${optional ? '(' : ''}${prefix}(?<${param}>${body})${optional ? ')?' : ''}`;
         offset = result.index + match.length;
     }
 

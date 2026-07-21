@@ -20,6 +20,10 @@ app.get('/alt/:from(a|ab)-:to', (req, res) => {
     res.send(`alt from: ${req.params.from}, to: ${req.params.to}`);
 });
 
+app.get('/opt/:p(.*)-end', (req, res) => {
+    res.send(`opt: ${req.params.p}`);
+});
+
 app.listen(13333, async () => {
     console.log('Server is running on port 13333');
 
@@ -36,6 +40,13 @@ app.listen(13333, async () => {
     console.log(await res.text());
 
     res = await fetch('http://localhost:13333/alt/ab-1');
+    console.log(await res.text());
+
+    // custom capture matching empty must not match before a literal (path-to-regexp parity)
+    res = await fetch('http://localhost:13333/opt/-end');
+    console.log('opt/-end:', res.status);
+
+    res = await fetch('http://localhost:13333/opt/abc-end');
     console.log(await res.text());
 
     process.exit(0);
